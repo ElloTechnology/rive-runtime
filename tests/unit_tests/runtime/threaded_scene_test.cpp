@@ -235,3 +235,63 @@ TEST_CASE("ThreadedScene concurrent access stress", "[ThreadedScene]")
     // If we got here without a crash or deadlock, the test passes.
     REQUIRE(renderCount.load(std::memory_order_relaxed) > 0);
 }
+
+TEST_CASE("ThreadedScene ViewModel inputs don't crash without VM",
+          "[ThreadedScene]")
+{
+    // Scene created without a ViewModelInstanceRuntime — ViewModel
+    // methods should be graceful no-ops.
+    std::atomic<int> renderCount{0};
+    auto scene = makeThreadedScene("assets/multiple_state_machines.riv",
+                                   &renderCount);
+
+    scene->setViewModelEnum("nonexistent", "someValue");
+    scene->setViewModelNumber("nonexistent", 42.0f);
+    scene->setViewModelBool("nonexistent", true);
+    scene->setViewModelString("nonexistent", "hello");
+    scene->fireViewModelTrigger("nonexistent");
+    scene->postElapsedTime(0.016f);
+
+    REQUIRE(waitFor([&]() {
+        return renderCount.load(std::memory_order_relaxed) > 1;
+    }));
+}
+
+TEST_CASE("ThreadedScene ViewModel concurrent stress", "[ThreadedScene]")
+{
+    std::atomic<int> renderCount{0};
+    auto scene = makeThreadedScene("assets/multiple_state_machines.riv",
+                                   &renderCount);
+
+    std::atomic<bool> running{true};
+
+    std::thread vmWriter([&]() {
+        while (running.load(std::memory_order_relaxed))
+        {
+            scene->setViewModelEnum("currentAction", "idle");
+            scene->setViewModelNumber("volume", 0.5f);
+            scene->setViewModelBool("enabled", true);
+            scene->setViewModelString("label", "test");
+            scene->fireViewModelTrigger("fidget");
+        }
+    });
+
+    std::thread timeAndReader([&]() {
+        while (running.load(std::memory_order_relaxed))
+        {
+            scene->postElapsedTime(0.001f);
+            auto img = scene->acquireCachedImage();
+            (void)img;
+            std::vector<ThreadedOutputEvent> events;
+            scene->pollReportedEvents(events);
+        }
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    running.store(false, std::memory_order_relaxed);
+
+    vmWriter.join();
+    timeAndReader.join();
+
+    REQUIRE(renderCount.load(std::memory_order_relaxed) > 0);
+}
