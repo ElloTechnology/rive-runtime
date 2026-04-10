@@ -19,6 +19,8 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
+#include <variant>
 #include <vector>
 
 namespace rive
@@ -100,6 +102,16 @@ struct ThreadedOutputEvent
     float secondsDelay = 0.0f;
 };
 
+// A property value read from a ViewModel after an advance cycle.
+using ViewModelPropertyValue = std::variant<std::monostate, // unset / not found
+                                            bool,
+                                            float,
+                                            std::string>;
+
+// Snapshot of watched ViewModel property values, produced by the background
+// thread after each advance and readable by the render thread.
+using ViewModelSnapshot = std::unordered_map<std::string, ViewModelPropertyValue>;
+
 // Runs advanceAndApply on a background thread and caches the rendered output
 // as a RenderImage. The render thread blits this cached image each frame,
 // decoupling the state machine evaluation rate from the UI frame rate.
@@ -168,6 +180,19 @@ public:
                             const std::string& value);
     void fireViewModelTrigger(const std::string& propertyName);
 
+    // Register ViewModel properties to snapshot after each advance.
+    // Call before or after construction; takes effect on the next advance.
+    // Each name is a ViewModel property path (e.g., "currentAction").
+    // The type is inferred from the ViewModel at snapshot time.
+    void watchViewModelProperty(const std::string& propertyName);
+    void unwatchViewModelProperty(const std::string& propertyName);
+
+    // Read the latest snapshot of watched ViewModel property values.
+    // Returns the snapshot produced after the most recent advance.
+    // Protected by the same mutex as acquireCachedImage — zero extra
+    // synchronization cost when called in the same frame.
+    ViewModelSnapshot acquireViewModelSnapshot();
+
     // Request a resize of the offscreen surface. Takes effect on the next
     // background thread cycle.
     void resize(int width, int height);
@@ -199,15 +224,25 @@ private:
     void pushEvent(ThreadedInputEvent event);
     void applyInputEvents();
     void collectReportedEvents();
+    void snapshotViewModelProperties();
     void runOneFrame(float dt);
 
     std::unique_ptr<ArtboardInstance> m_artboard;
     std::unique_ptr<StateMachineInstance> m_stateMachine;
     RenderCallback m_renderCallback;
 
-    // Cached image: written by background thread, read by render thread.
+    // Cached image + ViewModel snapshot: written by background thread,
+    // read by render thread. Both protected by the same mutex.
     std::mutex m_cachedImageMutex;
     rcp<RenderImage> m_cachedImage;
+    ViewModelSnapshot m_viewModelSnapshot;
+
+    // Watch list: written by render thread, read by background thread.
+    std::mutex m_watchListMutex;
+    std::vector<std::string> m_watchedProperties;
+
+    // Staging area for snapshot (background thread only, no lock needed).
+    ViewModelSnapshot m_pendingSnapshot;
 
     // Accumulated elapsed time.
     std::atomic<float> m_accumulatedTime{0.0f};
