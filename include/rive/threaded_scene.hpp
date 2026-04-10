@@ -14,6 +14,8 @@
 #include <condition_variable>
 #include <deque>
 #include <functional>
+#include <iterator>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -84,10 +86,11 @@ struct ThreadedInputEvent
     Vec2D position;
     int pointerId = 0;
     std::string inputName;
-    std::string stringValue; // for enum/string ViewModel properties
+    std::string stringValue;
     float floatValue = 0.0f;
-    float floatValue2 = 0.0f; // height for resize
     bool boolValue = false;
+    int intValue = 0;
+    int intValue2 = 0;
 };
 
 // Output event forwarded from the background thread to the render/UI thread.
@@ -193,6 +196,7 @@ public:
 
 private:
     void threadMain();
+    void pushEvent(ThreadedInputEvent event);
     void applyInputEvents();
     void collectReportedEvents();
     void runOneFrame(float dt);
@@ -211,6 +215,7 @@ private:
     // Event queues.
     ThreadedEventQueue<ThreadedInputEvent> m_inputQueue;
     ThreadedEventQueue<ThreadedOutputEvent> m_outputQueue;
+    std::vector<ThreadedInputEvent> m_drainBuffer; // reused each cycle
 
     // Thread lifecycle.
     std::thread m_thread;
