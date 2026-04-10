@@ -14,7 +14,6 @@
 #include "rive/viewmodel/runtime/viewmodel_instance_string_runtime.hpp"
 #include "rive/viewmodel/runtime/viewmodel_instance_trigger_runtime.hpp"
 
-#include <algorithm>
 #include <chrono>
 
 namespace rive
@@ -78,14 +77,19 @@ void ThreadedScene::postElapsedTime(float seconds)
     m_wakeCV.notify_one();
 }
 
+void ThreadedScene::pushEvent(ThreadedInputEvent event)
+{
+    m_inputQueue.push(std::move(event));
+    m_wakeCV.notify_one();
+}
+
 void ThreadedScene::pointerDown(Vec2D position, int pointerId)
 {
     ThreadedInputEvent event;
     event.type = ThreadedInputEvent::pointerDown;
     event.position = position;
     event.pointerId = pointerId;
-    m_inputQueue.push(std::move(event));
-    m_wakeCV.notify_one();
+    pushEvent(std::move(event));
 }
 
 void ThreadedScene::pointerMove(Vec2D position, int pointerId)
@@ -94,8 +98,7 @@ void ThreadedScene::pointerMove(Vec2D position, int pointerId)
     event.type = ThreadedInputEvent::pointerMove;
     event.position = position;
     event.pointerId = pointerId;
-    m_inputQueue.push(std::move(event));
-    m_wakeCV.notify_one();
+    pushEvent(std::move(event));
 }
 
 void ThreadedScene::pointerUp(Vec2D position, int pointerId)
@@ -104,8 +107,7 @@ void ThreadedScene::pointerUp(Vec2D position, int pointerId)
     event.type = ThreadedInputEvent::pointerUp;
     event.position = position;
     event.pointerId = pointerId;
-    m_inputQueue.push(std::move(event));
-    m_wakeCV.notify_one();
+    pushEvent(std::move(event));
 }
 
 void ThreadedScene::pointerExit(Vec2D position, int pointerId)
@@ -114,8 +116,7 @@ void ThreadedScene::pointerExit(Vec2D position, int pointerId)
     event.type = ThreadedInputEvent::pointerExit;
     event.position = position;
     event.pointerId = pointerId;
-    m_inputQueue.push(std::move(event));
-    m_wakeCV.notify_one();
+    pushEvent(std::move(event));
 }
 
 void ThreadedScene::setBoolInput(const std::string& name, bool value)
@@ -124,8 +125,7 @@ void ThreadedScene::setBoolInput(const std::string& name, bool value)
     event.type = ThreadedInputEvent::setBool;
     event.inputName = name;
     event.boolValue = value;
-    m_inputQueue.push(std::move(event));
-    m_wakeCV.notify_one();
+    pushEvent(std::move(event));
 }
 
 void ThreadedScene::setNumberInput(const std::string& name, float value)
@@ -134,8 +134,7 @@ void ThreadedScene::setNumberInput(const std::string& name, float value)
     event.type = ThreadedInputEvent::setNumber;
     event.inputName = name;
     event.floatValue = value;
-    m_inputQueue.push(std::move(event));
-    m_wakeCV.notify_one();
+    pushEvent(std::move(event));
 }
 
 void ThreadedScene::fireTrigger(const std::string& name)
@@ -143,8 +142,7 @@ void ThreadedScene::fireTrigger(const std::string& name)
     ThreadedInputEvent event;
     event.type = ThreadedInputEvent::fireTrigger;
     event.inputName = name;
-    m_inputQueue.push(std::move(event));
-    m_wakeCV.notify_one();
+    pushEvent(std::move(event));
 }
 
 void ThreadedScene::setViewModelEnum(const std::string& propertyName,
@@ -154,8 +152,7 @@ void ThreadedScene::setViewModelEnum(const std::string& propertyName,
     event.type = ThreadedInputEvent::setViewModelEnum;
     event.inputName = propertyName;
     event.stringValue = value;
-    m_inputQueue.push(std::move(event));
-    m_wakeCV.notify_one();
+    pushEvent(std::move(event));
 }
 
 void ThreadedScene::setViewModelNumber(const std::string& propertyName,
@@ -165,8 +162,7 @@ void ThreadedScene::setViewModelNumber(const std::string& propertyName,
     event.type = ThreadedInputEvent::setViewModelNumber;
     event.inputName = propertyName;
     event.floatValue = value;
-    m_inputQueue.push(std::move(event));
-    m_wakeCV.notify_one();
+    pushEvent(std::move(event));
 }
 
 void ThreadedScene::setViewModelBool(const std::string& propertyName,
@@ -176,8 +172,7 @@ void ThreadedScene::setViewModelBool(const std::string& propertyName,
     event.type = ThreadedInputEvent::setViewModelBool;
     event.inputName = propertyName;
     event.boolValue = value;
-    m_inputQueue.push(std::move(event));
-    m_wakeCV.notify_one();
+    pushEvent(std::move(event));
 }
 
 void ThreadedScene::setViewModelString(const std::string& propertyName,
@@ -187,8 +182,7 @@ void ThreadedScene::setViewModelString(const std::string& propertyName,
     event.type = ThreadedInputEvent::setViewModelString;
     event.inputName = propertyName;
     event.stringValue = value;
-    m_inputQueue.push(std::move(event));
-    m_wakeCV.notify_one();
+    pushEvent(std::move(event));
 }
 
 void ThreadedScene::fireViewModelTrigger(const std::string& propertyName)
@@ -196,18 +190,16 @@ void ThreadedScene::fireViewModelTrigger(const std::string& propertyName)
     ThreadedInputEvent event;
     event.type = ThreadedInputEvent::fireViewModelTrigger;
     event.inputName = propertyName;
-    m_inputQueue.push(std::move(event));
-    m_wakeCV.notify_one();
+    pushEvent(std::move(event));
 }
 
 void ThreadedScene::resize(int width, int height)
 {
     ThreadedInputEvent event;
     event.type = ThreadedInputEvent::resize;
-    event.floatValue = static_cast<float>(width);
-    event.floatValue2 = static_cast<float>(height);
-    m_inputQueue.push(std::move(event));
-    m_wakeCV.notify_one();
+    event.intValue = width;
+    event.intValue2 = height;
+    pushEvent(std::move(event));
 }
 
 rcp<RenderImage> ThreadedScene::acquireCachedImage()
@@ -227,7 +219,6 @@ void ThreadedScene::threadMain()
 {
     while (m_running.load(std::memory_order_relaxed))
     {
-        // Wait for work: elapsed time posted or input events queued.
         {
             std::unique_lock<std::mutex> lock(m_wakeMutex);
             m_wakeCV.wait_for(lock, std::chrono::milliseconds(100));
@@ -238,23 +229,24 @@ void ThreadedScene::threadMain()
             break;
         }
 
-        // Consume accumulated elapsed time.
         float dt = m_accumulatedTime.exchange(0.0f, std::memory_order_relaxed);
-
-        // Apply queued input events to the state machine.
         applyInputEvents();
 
-        // Advance and render.
+        if (dt == 0.0f && m_drainBuffer.empty())
+        {
+            continue;
+        }
+
         runOneFrame(dt);
     }
 }
 
 void ThreadedScene::applyInputEvents()
 {
-    std::vector<ThreadedInputEvent> events;
-    m_inputQueue.drainInto(events);
+    m_drainBuffer.clear();
+    m_inputQueue.drainInto(m_drainBuffer);
 
-    for (const auto& event : events)
+    for (const auto& event : m_drainBuffer)
     {
         switch (event.type)
         {
@@ -292,10 +284,8 @@ void ThreadedScene::applyInputEvents()
                 }
                 break;
             case ThreadedInputEvent::resize:
-                m_width.store(static_cast<int>(event.floatValue),
-                              std::memory_order_relaxed);
-                m_height.store(static_cast<int>(event.floatValue2),
-                               std::memory_order_relaxed);
+                m_width.store(event.intValue, std::memory_order_relaxed);
+                m_height.store(event.intValue2, std::memory_order_relaxed);
                 break;
             case ThreadedInputEvent::setViewModelEnum:
                 if (m_viewModelInstance)
