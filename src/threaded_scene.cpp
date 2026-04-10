@@ -8,6 +8,11 @@
 #include "rive/artboard.hpp"
 #include "rive/event.hpp"
 #include "rive/event_report.hpp"
+#include "rive/viewmodel/runtime/viewmodel_instance_enum_runtime.hpp"
+#include "rive/viewmodel/runtime/viewmodel_instance_number_runtime.hpp"
+#include "rive/viewmodel/runtime/viewmodel_instance_boolean_runtime.hpp"
+#include "rive/viewmodel/runtime/viewmodel_instance_string_runtime.hpp"
+#include "rive/viewmodel/runtime/viewmodel_instance_trigger_runtime.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -19,10 +24,12 @@ ThreadedScene::ThreadedScene(
     std::unique_ptr<ArtboardInstance> artboard,
     std::unique_ptr<StateMachineInstance> stateMachine,
     Config config,
-    RenderCallback renderCallback) :
+    RenderCallback renderCallback,
+    rcp<ViewModelInstanceRuntime> viewModelInstance) :
     m_artboard(std::move(artboard)),
     m_stateMachine(std::move(stateMachine)),
     m_renderCallback(std::move(renderCallback)),
+    m_viewModelInstance(std::move(viewModelInstance)),
     m_width(config.width),
     m_height(config.height)
 {
@@ -140,6 +147,59 @@ void ThreadedScene::fireTrigger(const std::string& name)
     m_wakeCV.notify_one();
 }
 
+void ThreadedScene::setViewModelEnum(const std::string& propertyName,
+                                     const std::string& value)
+{
+    ThreadedInputEvent event;
+    event.type = ThreadedInputEvent::setViewModelEnum;
+    event.inputName = propertyName;
+    event.stringValue = value;
+    m_inputQueue.push(std::move(event));
+    m_wakeCV.notify_one();
+}
+
+void ThreadedScene::setViewModelNumber(const std::string& propertyName,
+                                       float value)
+{
+    ThreadedInputEvent event;
+    event.type = ThreadedInputEvent::setViewModelNumber;
+    event.inputName = propertyName;
+    event.floatValue = value;
+    m_inputQueue.push(std::move(event));
+    m_wakeCV.notify_one();
+}
+
+void ThreadedScene::setViewModelBool(const std::string& propertyName,
+                                     bool value)
+{
+    ThreadedInputEvent event;
+    event.type = ThreadedInputEvent::setViewModelBool;
+    event.inputName = propertyName;
+    event.boolValue = value;
+    m_inputQueue.push(std::move(event));
+    m_wakeCV.notify_one();
+}
+
+void ThreadedScene::setViewModelString(const std::string& propertyName,
+                                       const std::string& value)
+{
+    ThreadedInputEvent event;
+    event.type = ThreadedInputEvent::setViewModelString;
+    event.inputName = propertyName;
+    event.stringValue = value;
+    m_inputQueue.push(std::move(event));
+    m_wakeCV.notify_one();
+}
+
+void ThreadedScene::fireViewModelTrigger(const std::string& propertyName)
+{
+    ThreadedInputEvent event;
+    event.type = ThreadedInputEvent::fireViewModelTrigger;
+    event.inputName = propertyName;
+    m_inputQueue.push(std::move(event));
+    m_wakeCV.notify_one();
+}
+
 void ThreadedScene::resize(int width, int height)
 {
     ThreadedInputEvent event;
@@ -236,6 +296,56 @@ void ThreadedScene::applyInputEvents()
                               std::memory_order_relaxed);
                 m_height.store(static_cast<int>(event.floatValue2),
                                std::memory_order_relaxed);
+                break;
+            case ThreadedInputEvent::setViewModelEnum:
+                if (m_viewModelInstance)
+                {
+                    if (auto* prop =
+                            m_viewModelInstance->propertyEnum(event.inputName))
+                    {
+                        prop->value(event.stringValue);
+                    }
+                }
+                break;
+            case ThreadedInputEvent::setViewModelNumber:
+                if (m_viewModelInstance)
+                {
+                    if (auto* prop = m_viewModelInstance->propertyNumber(
+                            event.inputName))
+                    {
+                        prop->value(event.floatValue);
+                    }
+                }
+                break;
+            case ThreadedInputEvent::setViewModelBool:
+                if (m_viewModelInstance)
+                {
+                    if (auto* prop = m_viewModelInstance->propertyBoolean(
+                            event.inputName))
+                    {
+                        prop->value(event.boolValue);
+                    }
+                }
+                break;
+            case ThreadedInputEvent::setViewModelString:
+                if (m_viewModelInstance)
+                {
+                    if (auto* prop = m_viewModelInstance->propertyString(
+                            event.inputName))
+                    {
+                        prop->value(event.stringValue);
+                    }
+                }
+                break;
+            case ThreadedInputEvent::fireViewModelTrigger:
+                if (m_viewModelInstance)
+                {
+                    if (auto* prop = m_viewModelInstance->propertyTrigger(
+                            event.inputName))
+                    {
+                        prop->trigger();
+                    }
+                }
                 break;
         }
     }

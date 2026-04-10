@@ -8,6 +8,7 @@
 #include "rive/math/vec2d.hpp"
 #include "rive/refcnt.hpp"
 #include "rive/renderer.hpp"
+#include "rive/viewmodel/runtime/viewmodel_instance_runtime.hpp"
 
 #include <atomic>
 #include <condition_variable>
@@ -72,12 +73,18 @@ struct ThreadedInputEvent
         setNumber,
         fireTrigger,
         resize,
+        setViewModelEnum,
+        setViewModelNumber,
+        setViewModelBool,
+        setViewModelString,
+        fireViewModelTrigger,
     };
 
     Type type;
     Vec2D position;
     int pointerId = 0;
     std::string inputName;
+    std::string stringValue; // for enum/string ViewModel properties
     float floatValue = 0.0f;
     float floatValue2 = 0.0f; // height for resize
     bool boolValue = false;
@@ -118,11 +125,13 @@ public:
         std::function<rcp<RenderImage>(ArtboardInstance*, int width, int height)>;
 
     // Takes ownership of the artboard and state machine. They must not be
-    // accessed after this call.
+    // accessed after this call. The viewModelInstance is optional — pass
+    // nullptr if the artboard doesn't use ViewModel data binding.
     ThreadedScene(std::unique_ptr<ArtboardInstance> artboard,
                   std::unique_ptr<StateMachineInstance> stateMachine,
                   Config config,
-                  RenderCallback renderCallback);
+                  RenderCallback renderCallback,
+                  rcp<ViewModelInstanceRuntime> viewModelInstance = nullptr);
 
     ~ThreadedScene();
 
@@ -142,10 +151,19 @@ public:
     void pointerUp(Vec2D position, int pointerId = 0);
     void pointerExit(Vec2D position, int pointerId = 0);
 
-    // Post state machine input changes.
+    // Post state machine input changes (raw SM inputs by name).
     void setBoolInput(const std::string& name, bool value);
     void setNumberInput(const std::string& name, float value);
     void fireTrigger(const std::string& name);
+
+    // Post ViewModel property changes (requires ViewModelInstanceRuntime).
+    void setViewModelEnum(const std::string& propertyName,
+                          const std::string& value);
+    void setViewModelNumber(const std::string& propertyName, float value);
+    void setViewModelBool(const std::string& propertyName, bool value);
+    void setViewModelString(const std::string& propertyName,
+                            const std::string& value);
+    void fireViewModelTrigger(const std::string& propertyName);
 
     // Request a resize of the offscreen surface. Takes effect on the next
     // background thread cycle.
@@ -199,6 +217,9 @@ private:
     std::atomic<bool> m_running{false};
     std::mutex m_wakeMutex;
     std::condition_variable m_wakeCV;
+
+    // ViewModel instance for property lookups (accessed only on bg thread).
+    rcp<ViewModelInstanceRuntime> m_viewModelInstance;
 
     // Dimensions (atomics for lock-free reads from render thread).
     std::atomic<int> m_width{0};
