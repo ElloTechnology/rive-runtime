@@ -295,3 +295,53 @@ TEST_CASE("ThreadedScene ViewModel concurrent stress", "[ThreadedScene]")
 
     REQUIRE(renderCount.load(std::memory_order_relaxed) > 0);
 }
+
+TEST_CASE("ThreadedScene ViewModel snapshot empty without watch",
+          "[ThreadedScene]")
+{
+    auto scene = makeThreadedScene("assets/multiple_state_machines.riv");
+
+    scene->postElapsedTime(0.016f);
+    REQUIRE(waitFor([&]() {
+        return scene->acquireCachedImage() != nullptr;
+    }));
+
+    auto snapshot = scene->acquireViewModelSnapshot();
+    REQUIRE(snapshot.empty());
+}
+
+TEST_CASE("ThreadedScene ViewModel snapshot returns empty without VM",
+          "[ThreadedScene]")
+{
+    std::atomic<int> renderCount{0};
+    auto scene = makeThreadedScene("assets/multiple_state_machines.riv",
+                                   &renderCount);
+
+    scene->watchViewModelProperty("nonexistent_prop");
+    scene->postElapsedTime(0.016f);
+
+    int initialCount = renderCount.load(std::memory_order_relaxed);
+    REQUIRE(waitFor([&]() {
+        return renderCount.load(std::memory_order_relaxed) > initialCount;
+    }));
+
+    // Without a ViewModelInstanceRuntime bound, snapshot stays empty.
+    auto snapshot = scene->acquireViewModelSnapshot();
+    REQUIRE(snapshot.empty());
+}
+
+TEST_CASE("ThreadedScene watch and unwatch", "[ThreadedScene]")
+{
+    auto scene = makeThreadedScene("assets/multiple_state_machines.riv");
+
+    scene->watchViewModelProperty("propA");
+    scene->watchViewModelProperty("propB");
+    scene->watchViewModelProperty("propA"); // duplicate — no-op
+    scene->unwatchViewModelProperty("propA");
+    scene->unwatchViewModelProperty("nonexistent"); // no-op
+
+    scene->postElapsedTime(0.016f);
+    REQUIRE(waitFor([&]() {
+        return scene->acquireCachedImage() != nullptr;
+    }));
+}

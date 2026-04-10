@@ -193,6 +193,39 @@ void ThreadedScene::fireViewModelTrigger(const std::string& propertyName)
     pushEvent(std::move(event));
 }
 
+void ThreadedScene::watchViewModelProperty(const std::string& propertyName)
+{
+    std::lock_guard<std::mutex> lock(m_watchListMutex);
+    for (const auto& name : m_watchedProperties)
+    {
+        if (name == propertyName)
+        {
+            return; // already watching
+        }
+    }
+    m_watchedProperties.push_back(propertyName);
+}
+
+void ThreadedScene::unwatchViewModelProperty(const std::string& propertyName)
+{
+    std::lock_guard<std::mutex> lock(m_watchListMutex);
+    for (auto it = m_watchedProperties.begin(); it != m_watchedProperties.end();
+         ++it)
+    {
+        if (*it == propertyName)
+        {
+            m_watchedProperties.erase(it);
+            return;
+        }
+    }
+}
+
+ViewModelSnapshot ThreadedScene::acquireViewModelSnapshot()
+{
+    std::lock_guard<std::mutex> lock(m_cachedImageMutex);
+    return m_viewModelSnapshot;
+}
+
 void ThreadedScene::resize(int width, int height)
 {
     ThreadedInputEvent event;
@@ -353,22 +386,80 @@ void ThreadedScene::collectReportedEvents()
     }
 }
 
+void ThreadedScene::snapshotViewModelProperties()
+{
+    if (!m_viewModelInstance)
+    {
+        return;
+    }
+
+    // Copy the watch list under its own lock.
+    std::vector<std::string> watched;
+    {
+        std::lock_guard<std::mutex> lock(m_watchListMutex);
+        watched = m_watchedProperties;
+    }
+
+    if (watched.empty())
+    {
+        return;
+    }
+
+    // Read current values on the background thread (safe — we own the VM).
+    ViewModelSnapshot snapshot;
+    for (const auto& name : watched)
+    {
+        if (auto* prop = m_viewModelInstance->propertyEnum(name))
+        {
+            snapshot[name] = prop->value();
+        }
+        else if (auto* prop = m_viewModelInstance->propertyNumber(name))
+        {
+            snapshot[name] = static_cast<float>(prop->value());
+        }
+        else if (auto* prop = m_viewModelInstance->propertyBoolean(name))
+        {
+            snapshot[name] = prop->value();
+        }
+        else if (auto* prop = m_viewModelInstance->propertyString(name))
+        {
+            snapshot[name] = prop->value();
+        }
+        else
+        {
+            snapshot[name] = std::monostate{};
+        }
+    }
+
+    m_pendingSnapshot = std::move(snapshot);
+}
+
 void ThreadedScene::runOneFrame(float dt)
 {
     m_stateMachine->advanceAndApply(dt);
     collectReportedEvents();
+    snapshotViewModelProperties();
 
     int w = m_width.load(std::memory_order_relaxed);
     int h = m_height.load(std::memory_order_relaxed);
 
+    rcp<RenderImage> newImage;
     if (m_renderCallback && w > 0 && h > 0)
     {
-        rcp<RenderImage> newImage =
-            m_renderCallback(m_artboard.get(), w, h);
+        newImage = m_renderCallback(m_artboard.get(), w, h);
+    }
+
+    // Swap the cached image and ViewModel snapshot together under one lock
+    // so the render thread sees a consistent pair.
+    {
+        std::lock_guard<std::mutex> lock(m_cachedImageMutex);
         if (newImage)
         {
-            std::lock_guard<std::mutex> lock(m_cachedImageMutex);
             m_cachedImage = std::move(newImage);
+        }
+        if (!m_pendingSnapshot.empty())
+        {
+            m_viewModelSnapshot = std::move(m_pendingSnapshot);
         }
     }
 }
