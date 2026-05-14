@@ -29,6 +29,7 @@ ThreadedScene::ThreadedScene(
     m_stateMachine(std::move(stateMachine)),
     m_renderCallback(std::move(renderCallback)),
     m_viewModelInstance(std::move(viewModelInstance)),
+    m_logWarning(std::move(config.logWarning)),
     m_width(config.width),
     m_height(config.height)
 {
@@ -41,20 +42,37 @@ ThreadedScene::ThreadedScene(
     m_thread = std::thread(&ThreadedScene::threadMain, this);
 }
 
-ThreadedScene::~ThreadedScene() { stop(); }
+ThreadedScene::~ThreadedScene()
+{
+    stop();
+    if (m_stateMachine != nullptr && m_artboard != nullptr)
+    {
+#ifdef WITH_RIVE_TOOLS
+        if (!m_stateMachine->hasExternalFocusManager())
+        {
+            auto* fm = m_stateMachine->internalFocusManager();
+            if (fm != nullptr)
+            {
+                fm->setFocusChangedCallback(nullptr);
+            }
+        }
+#endif
+        m_artboard->cleanupFocusTree();
+    }
+}
 
 void ThreadedScene::stop()
 {
-    bool expected = true;
-    if (!m_running.compare_exchange_strong(expected,
-                                           false,
-                                           std::memory_order_release,
-                                           std::memory_order_relaxed))
-    {
-        return; // already stopped
-    }
     {
         std::lock_guard<std::mutex> lock(m_wakeMutex);
+        bool expected = true;
+        if (!m_running.compare_exchange_strong(expected,
+                                               false,
+                                               std::memory_order_release,
+                                               std::memory_order_relaxed))
+        {
+            return;
+        }
         m_wakeFlag = true;
     }
     m_wakeCV.notify_one();
@@ -300,9 +318,9 @@ void ThreadedScene::threadMain()
         }
 
         float dt = m_accumulatedTime.exchange(0.0f, std::memory_order_relaxed);
-        applyInputEvents();
+        bool hadEvents = applyInputEvents();
 
-        if (dt == 0.0f && m_drainBuffer.empty())
+        if (dt == 0.0f && !hadEvents)
         {
             continue;
         }
@@ -311,12 +329,20 @@ void ThreadedScene::threadMain()
     }
 }
 
-void ThreadedScene::applyInputEvents()
+bool ThreadedScene::applyInputEvents()
 {
-    m_drainBuffer.clear();
-    m_inputQueue.drainInto(m_drainBuffer);
+    thread_local std::vector<ThreadedInputEvent> drainBuffer;
+    drainBuffer.clear();
+    m_inputQueue.drainInto(drainBuffer);
 
-    for (const auto& event : m_drainBuffer)
+    auto logMissing = [this](const char* kind, const std::string& name) {
+        if (m_logWarning)
+        {
+            m_logWarning(std::string(kind) + ": no input named '" + name + "'");
+        }
+    };
+
+    for (const auto& event : drainBuffer)
     {
         switch (event.type)
         {
@@ -338,6 +364,10 @@ void ThreadedScene::applyInputEvents()
                 {
                     input->value(event.boolValue);
                 }
+                else
+                {
+                    logMissing("setBool", event.inputName);
+                }
                 break;
             case ThreadedInputEvent::setNumber:
                 if (auto* input =
@@ -345,12 +375,20 @@ void ThreadedScene::applyInputEvents()
                 {
                     input->value(event.floatValue);
                 }
+                else
+                {
+                    logMissing("setNumber", event.inputName);
+                }
                 break;
             case ThreadedInputEvent::fireTrigger:
                 if (auto* input =
                         m_stateMachine->getTrigger(event.inputName))
                 {
                     input->fire();
+                }
+                else
+                {
+                    logMissing("fireTrigger", event.inputName);
                 }
                 break;
             case ThreadedInputEvent::resize:
@@ -365,6 +403,14 @@ void ThreadedScene::applyInputEvents()
                     {
                         prop->value(event.stringValue);
                     }
+                    else
+                    {
+                        logMissing("setViewModelEnum", event.inputName);
+                    }
+                }
+                else
+                {
+                    logMissing("setViewModelEnum", event.inputName);
                 }
                 break;
             case ThreadedInputEvent::setViewModelNumber:
@@ -375,6 +421,14 @@ void ThreadedScene::applyInputEvents()
                     {
                         prop->value(event.floatValue);
                     }
+                    else
+                    {
+                        logMissing("setViewModelNumber", event.inputName);
+                    }
+                }
+                else
+                {
+                    logMissing("setViewModelNumber", event.inputName);
                 }
                 break;
             case ThreadedInputEvent::setViewModelBool:
@@ -385,6 +439,14 @@ void ThreadedScene::applyInputEvents()
                     {
                         prop->value(event.boolValue);
                     }
+                    else
+                    {
+                        logMissing("setViewModelBool", event.inputName);
+                    }
+                }
+                else
+                {
+                    logMissing("setViewModelBool", event.inputName);
                 }
                 break;
             case ThreadedInputEvent::setViewModelString:
@@ -395,6 +457,14 @@ void ThreadedScene::applyInputEvents()
                     {
                         prop->value(event.stringValue);
                     }
+                    else
+                    {
+                        logMissing("setViewModelString", event.inputName);
+                    }
+                }
+                else
+                {
+                    logMissing("setViewModelString", event.inputName);
                 }
                 break;
             case ThreadedInputEvent::fireViewModelTrigger:
@@ -405,10 +475,19 @@ void ThreadedScene::applyInputEvents()
                     {
                         prop->trigger();
                     }
+                    else
+                    {
+                        logMissing("fireViewModelTrigger", event.inputName);
+                    }
+                }
+                else
+                {
+                    logMissing("fireViewModelTrigger", event.inputName);
                 }
                 break;
         }
     }
+    return !drainBuffer.empty();
 }
 
 void ThreadedScene::collectReportedEvents()
@@ -473,12 +552,14 @@ void ThreadedScene::snapshotViewModelProperties()
 
 void ThreadedScene::runOneFrame(float dt)
 {
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS) || defined(_CPPUNWIND)
     // The render callback executes user code on the background thread and can
     // throw (EGL/GL failures surfaced as exceptions, bad_alloc from rcp, etc.).
     // An uncaught exception out of threadMain would call std::terminate and
     // bypass the FFI fatal-error path, so contain it here and stop the loop.
     try
     {
+#endif
         m_stateMachine->advanceAndApply(dt);
         collectReportedEvents();
         snapshotViewModelProperties();
@@ -519,12 +600,14 @@ void ThreadedScene::runOneFrame(float dt)
                 m_pendingEvents.clear();
             }
         }
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS) || defined(_CPPUNWIND)
     }
     catch (...)
     {
         m_fatalError.store(true, std::memory_order_release);
         m_running.store(false, std::memory_order_release);
     }
+#endif
 }
 
 } // namespace rive

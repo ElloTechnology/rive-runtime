@@ -131,6 +131,7 @@ public:
         // If true, the first advance+render runs synchronously in the
         // constructor to avoid a flash of empty content.
         bool runFirstFrameSync = true;
+        std::function<void(const std::string&)> logWarning;
     };
 
     // Callback invoked on the background thread after each advanceAndApply.
@@ -238,7 +239,7 @@ public:
 private:
     void threadMain();
     void pushEvent(ThreadedInputEvent event);
-    void applyInputEvents();
+    bool applyInputEvents();
     void collectReportedEvents();
     void snapshotViewModelProperties();
     void runOneFrame(float dt);
@@ -271,7 +272,6 @@ private:
     // Input event queue (UI thread → bg thread). Output events are staged
     // and swapped together with the snapshot for coherent acquireFrame reads.
     ThreadedEventQueue<ThreadedInputEvent> m_inputQueue;
-    std::vector<ThreadedInputEvent> m_drainBuffer; // reused each cycle
 
     // Thread lifecycle.
     std::thread m_thread;
@@ -283,6 +283,7 @@ private:
 
     // ViewModel instance for property lookups (accessed only on bg thread).
     rcp<ViewModelInstanceRuntime> m_viewModelInstance;
+    std::function<void(const std::string&)> m_logWarning;
 
     // Dimensions (atomics for lock-free reads from render thread).
     std::atomic<int> m_width{0};
