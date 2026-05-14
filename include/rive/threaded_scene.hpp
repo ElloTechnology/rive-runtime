@@ -129,7 +129,8 @@ public:
         int width = 0;
         int height = 0;
         // If true, the first advance+render runs synchronously in the
-        // constructor to avoid a flash of empty content.
+        // constructor to avoid a flash of empty content. Bindings whose render
+        // callback must run only on the worker thread should set this false.
         bool runFirstFrameSync = true;
         std::function<void(const std::string&)> logWarning;
     };
