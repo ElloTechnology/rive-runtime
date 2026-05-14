@@ -65,14 +65,7 @@ void ThreadedScene::stop()
 {
     {
         std::lock_guard<std::mutex> lock(m_wakeMutex);
-        bool expected = true;
-        if (!m_running.compare_exchange_strong(expected,
-                                               false,
-                                               std::memory_order_release,
-                                               std::memory_order_relaxed))
-        {
-            return;
-        }
+        m_running.store(false, std::memory_order_release);
         m_wakeFlag = true;
     }
     m_wakeCV.notify_one();
