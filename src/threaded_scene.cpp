@@ -37,7 +37,7 @@ ThreadedScene::ThreadedScene(
         runOneFrame(0.0f);
     }
 
-    m_running.store(true, std::memory_order_relaxed);
+    m_running.store(true, std::memory_order_release);
     m_thread = std::thread(&ThreadedScene::threadMain, this);
 }
 
@@ -46,9 +46,16 @@ ThreadedScene::~ThreadedScene() { stop(); }
 void ThreadedScene::stop()
 {
     bool expected = true;
-    if (!m_running.compare_exchange_strong(expected, false))
+    if (!m_running.compare_exchange_strong(expected,
+                                           false,
+                                           std::memory_order_release,
+                                           std::memory_order_relaxed))
     {
         return; // already stopped
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_wakeMutex);
+        m_wakeFlag = true;
     }
     m_wakeCV.notify_one();
     if (m_thread.joinable())
@@ -74,12 +81,20 @@ void ThreadedScene::postElapsedTime(float seconds)
         std::memory_order_relaxed))
     {
     }
+    {
+        std::lock_guard<std::mutex> lock(m_wakeMutex);
+        m_wakeFlag = true;
+    }
     m_wakeCV.notify_one();
 }
 
 void ThreadedScene::pushEvent(ThreadedInputEvent event)
 {
     m_inputQueue.push(std::move(event));
+    {
+        std::lock_guard<std::mutex> lock(m_wakeMutex);
+        m_wakeFlag = true;
+    }
     m_wakeCV.notify_one();
 }
 
@@ -250,14 +265,21 @@ void ThreadedScene::pollReportedEvents(std::vector<ThreadedOutputEvent>& out)
 
 void ThreadedScene::threadMain()
 {
-    while (m_running.load(std::memory_order_relaxed))
+    while (m_running.load(std::memory_order_acquire))
     {
         {
             std::unique_lock<std::mutex> lock(m_wakeMutex);
-            m_wakeCV.wait_for(lock, std::chrono::milliseconds(100));
+            m_wakeCV.wait_for(lock,
+                              std::chrono::milliseconds(100),
+                              [this] {
+                                  return m_wakeFlag ||
+                                         !m_running.load(
+                                             std::memory_order_acquire);
+                              });
+            m_wakeFlag = false;
         }
 
-        if (!m_running.load(std::memory_order_relaxed))
+        if (!m_running.load(std::memory_order_acquire))
         {
             break;
         }
@@ -436,31 +458,47 @@ void ThreadedScene::snapshotViewModelProperties()
 
 void ThreadedScene::runOneFrame(float dt)
 {
-    m_stateMachine->advanceAndApply(dt);
-    collectReportedEvents();
-    snapshotViewModelProperties();
-
-    int w = m_width.load(std::memory_order_relaxed);
-    int h = m_height.load(std::memory_order_relaxed);
-
-    rcp<RenderImage> newImage;
-    if (m_renderCallback && w > 0 && h > 0)
+    // The render callback executes user code on the background thread and can
+    // throw (EGL/GL failures surfaced as exceptions, bad_alloc from rcp, etc.).
+    // An uncaught exception out of threadMain would call std::terminate and
+    // bypass the FFI fatal-error path, so contain it here and stop the loop.
+    try
     {
-        newImage = m_renderCallback(m_artboard.get(), w, h);
+        m_stateMachine->advanceAndApply(dt);
+        collectReportedEvents();
+        snapshotViewModelProperties();
+
+        int w = m_width.load(std::memory_order_relaxed);
+        int h = m_height.load(std::memory_order_relaxed);
+
+        rcp<RenderImage> newImage;
+        if (m_renderCallback && w > 0 && h > 0)
+        {
+            newImage = m_renderCallback(m_artboard.get(), w, h);
+        }
+
+        // Swap the cached image and ViewModel snapshot together under one lock
+        // so the render thread sees a consistent pair.
+        {
+            std::lock_guard<std::mutex> lock(m_cachedImageMutex);
+            if (newImage)
+            {
+                m_cachedImage = std::move(newImage);
+            }
+            if (!m_pendingSnapshot.empty())
+            {
+                m_viewModelSnapshot = std::move(m_pendingSnapshot);
+                // The standard only guarantees a moved-from unordered_map is
+                // in a "valid but unspecified" state. Reset explicitly so the
+                // next cycle's empty() check is portable.
+                m_pendingSnapshot.clear();
+            }
+        }
     }
-
-    // Swap the cached image and ViewModel snapshot together under one lock
-    // so the render thread sees a consistent pair.
+    catch (...)
     {
-        std::lock_guard<std::mutex> lock(m_cachedImageMutex);
-        if (newImage)
-        {
-            m_cachedImage = std::move(newImage);
-        }
-        if (!m_pendingSnapshot.empty())
-        {
-            m_viewModelSnapshot = std::move(m_pendingSnapshot);
-        }
+        m_fatalError.store(true, std::memory_order_release);
+        m_running.store(false, std::memory_order_release);
     }
 }
 
