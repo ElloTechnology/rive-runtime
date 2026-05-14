@@ -258,7 +258,22 @@ rcp<RenderImage> ThreadedScene::acquireCachedImage()
 
 void ThreadedScene::pollReportedEvents(std::vector<ThreadedOutputEvent>& out)
 {
-    m_outputQueue.drainInto(out);
+    std::lock_guard<std::mutex> lock(m_cachedImageMutex);
+    out.insert(out.end(),
+               std::make_move_iterator(m_readyEvents.begin()),
+               std::make_move_iterator(m_readyEvents.end()));
+    m_readyEvents.clear();
+}
+
+void ThreadedScene::acquireFrame(ViewModelSnapshot& outSnapshot,
+                                 std::vector<ThreadedOutputEvent>& outEvents)
+{
+    std::lock_guard<std::mutex> lock(m_cachedImageMutex);
+    outSnapshot = m_viewModelSnapshot;
+    outEvents.insert(outEvents.end(),
+                     std::make_move_iterator(m_readyEvents.begin()),
+                     std::make_move_iterator(m_readyEvents.end()));
+    m_readyEvents.clear();
 }
 
 // --- Background thread ---
@@ -404,7 +419,7 @@ void ThreadedScene::collectReportedEvents()
         ThreadedOutputEvent out;
         out.eventName = report.event()->name();
         out.secondsDelay = report.secondsDelay();
-        m_outputQueue.push(std::move(out));
+        m_pendingEvents.push_back(std::move(out));
     }
 }
 
@@ -477,8 +492,10 @@ void ThreadedScene::runOneFrame(float dt)
             newImage = m_renderCallback(m_artboard.get(), w, h);
         }
 
-        // Swap the cached image and ViewModel snapshot together under one lock
-        // so the render thread sees a consistent pair.
+        // Swap cached image, ViewModel snapshot, and reported events
+        // together under one lock so the render thread sees a coherent
+        // triple from this bg cycle (event A and the snapshot reflecting
+        // A's transition land atomically).
         {
             std::lock_guard<std::mutex> lock(m_cachedImageMutex);
             if (newImage)
@@ -492,6 +509,14 @@ void ThreadedScene::runOneFrame(float dt)
                 // in a "valid but unspecified" state. Reset explicitly so the
                 // next cycle's empty() check is portable.
                 m_pendingSnapshot.clear();
+            }
+            if (!m_pendingEvents.empty())
+            {
+                m_readyEvents.insert(
+                    m_readyEvents.end(),
+                    std::make_move_iterator(m_pendingEvents.begin()),
+                    std::make_move_iterator(m_pendingEvents.end()));
+                m_pendingEvents.clear();
             }
         }
     }
