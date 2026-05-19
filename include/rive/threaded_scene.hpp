@@ -229,13 +229,11 @@ public:
         return m_running.load(std::memory_order_acquire);
     }
 
-    // Returns true if the background thread terminated because the render
-    // callback threw an uncaught exception. The scene is no longer producing
-    // frames; callers can fall back to a synchronous path.
-    bool hasFatalError() const
-    {
-        return m_fatalError.load(std::memory_order_acquire);
-    }
+    // Note: there is no scene-level fatal-error flag. Fatal-error
+    // reporting flows through the render callback's return value:
+    // callers (e.g. the Android binding) set their own atomic before
+    // returning nullptr on EGL/GL failure and surface that state to
+    // application code. The scene only stops via stop() / destruction.
 
 private:
     void threadMain();
@@ -277,7 +275,6 @@ private:
     // Thread lifecycle.
     std::thread m_thread;
     std::atomic<bool> m_running{false};
-    std::atomic<bool> m_fatalError{false};
     std::mutex m_wakeMutex;
     std::condition_variable m_wakeCV;
     bool m_wakeFlag = false; // protected by m_wakeMutex
