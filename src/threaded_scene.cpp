@@ -545,66 +545,56 @@ void ThreadedScene::snapshotViewModelProperties()
 
 void ThreadedScene::runOneFrame(float dt)
 {
-#if defined(__cpp_exceptions) || defined(__EXCEPTIONS) || defined(_CPPUNWIND)
-    // The render callback executes user code on the background thread and can
-    // throw (EGL/GL failures surfaced as exceptions, bad_alloc from rcp, etc.).
-    // An uncaught exception out of threadMain would call std::terminate and
-    // bypass the FFI fatal-error path, so contain it here and stop the loop.
-    // The Android Rive build sets -fno-exceptions; on that configuration the
-    // try/catch is unavailable, so the body runs unguarded. The render
-    // callback there marks fatal status via the binding-level atomic instead
-    // of throwing.
-    try
+    // Fatal-error reporting flows through the render callback's return
+    // value: callers (e.g. the Android binding) detect EGL/GL failure
+    // inside the callback and set their own atomic before returning
+    // nullptr. There is no try/catch here because every build that
+    // consumes this code is compiled with -fno-exceptions (Flutter
+    // Android, the unit_tests harness, etc.); a try/catch would compile
+    // out and a thrown exception would call std::terminate anyway. If a
+    // future build configuration enables exceptions, route fatal-error
+    // reporting through return values rather than reintroducing a
+    // catch-all here.
+    m_stateMachine->advanceAndApply(dt);
+    collectReportedEvents();
+    snapshotViewModelProperties();
+
+    int w = m_width.load(std::memory_order_relaxed);
+    int h = m_height.load(std::memory_order_relaxed);
+
+    rcp<RenderImage> newImage;
+    if (m_renderCallback && w > 0 && h > 0)
     {
-#endif
-        m_stateMachine->advanceAndApply(dt);
-        collectReportedEvents();
-        snapshotViewModelProperties();
-
-        int w = m_width.load(std::memory_order_relaxed);
-        int h = m_height.load(std::memory_order_relaxed);
-
-        rcp<RenderImage> newImage;
-        if (m_renderCallback && w > 0 && h > 0)
-        {
-            newImage = m_renderCallback(m_artboard.get(), w, h);
-        }
-
-        // Swap cached image, ViewModel snapshot, and reported events
-        // together under one lock so the render thread sees a coherent
-        // triple from this bg cycle (event A and the snapshot reflecting
-        // A's transition land atomically).
-        {
-            std::lock_guard<std::mutex> lock(m_cachedImageMutex);
-            if (newImage)
-            {
-                m_cachedImage = std::move(newImage);
-            }
-            if (!m_pendingSnapshot.empty())
-            {
-                m_viewModelSnapshot = std::move(m_pendingSnapshot);
-                // The standard only guarantees a moved-from unordered_map is
-                // in a "valid but unspecified" state. Reset explicitly so the
-                // next cycle's empty() check is portable.
-                m_pendingSnapshot.clear();
-            }
-            if (!m_pendingEvents.empty())
-            {
-                m_readyEvents.insert(
-                    m_readyEvents.end(),
-                    std::make_move_iterator(m_pendingEvents.begin()),
-                    std::make_move_iterator(m_pendingEvents.end()));
-                m_pendingEvents.clear();
-            }
-        }
-#if defined(__cpp_exceptions) || defined(__EXCEPTIONS) || defined(_CPPUNWIND)
+        newImage = m_renderCallback(m_artboard.get(), w, h);
     }
-    catch (...)
+
+    // Swap cached image, ViewModel snapshot, and reported events
+    // together under one lock so the render thread sees a coherent
+    // triple from this bg cycle (event A and the snapshot reflecting
+    // A's transition land atomically).
     {
-        m_fatalError.store(true, std::memory_order_release);
-        m_running.store(false, std::memory_order_release);
+        std::lock_guard<std::mutex> lock(m_cachedImageMutex);
+        if (newImage)
+        {
+            m_cachedImage = std::move(newImage);
+        }
+        if (!m_pendingSnapshot.empty())
+        {
+            m_viewModelSnapshot = std::move(m_pendingSnapshot);
+            // The standard only guarantees a moved-from unordered_map is
+            // in a "valid but unspecified" state. Reset explicitly so the
+            // next cycle's empty() check is portable.
+            m_pendingSnapshot.clear();
+        }
+        if (!m_pendingEvents.empty())
+        {
+            m_readyEvents.insert(
+                m_readyEvents.end(),
+                std::make_move_iterator(m_pendingEvents.begin()),
+                std::make_move_iterator(m_pendingEvents.end()));
+            m_pendingEvents.clear();
+        }
     }
-#endif
 }
 
 } // namespace rive
