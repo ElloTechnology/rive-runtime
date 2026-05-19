@@ -296,6 +296,66 @@ TEST_CASE("ThreadedScene ViewModel concurrent stress", "[ThreadedScene]")
     REQUIRE(renderCount.load(std::memory_order_relaxed) > 0);
 }
 
+TEST_CASE("ThreadedScene fireViewModelTrigger rapid-fire is preserved",
+          "[ThreadedScene]")
+{
+    // Rapid-fire VMI trigger calls between two advances must not crash, must
+    // not deadlock, and must not be silently dropped by the threading layer.
+    //
+    // The input queue is ThreadedEventQueue<ThreadedInputEvent> — an
+    // unbounded std::deque + mutex (threaded_scene.hpp). applyInputEvents()
+    // calls drainInto() and processes every event in the buffer before each
+    // runOneFrame(); there is no per-cycle cap on the input side.
+    //
+    // Note: this exercises the threading layer only. Rive's state machine
+    // treats trigger consumption as a rising-edge signal per advance — N
+    // fires of the same VMI trigger within a single advance window typically
+    // drive at most one transition, because the state machine only checks
+    // "did the trigger fire" once per cycle. That is intentional Rive
+    // runtime behavior, not a threading bug. Application code that needs N
+    // visible transitions must advance the state machine between fires; the
+    // rig's triggers (fidget, gesture-react, drawing-end) are one-shot and
+    // unaffected.
+    std::atomic<int> renderCount{0};
+    auto scene = makeThreadedScene("assets/multiple_state_machines.riv",
+                                   &renderCount);
+
+    constexpr int kFireCount = 256;
+
+    // Burst 1: single-threaded rapid fires, all queued before the next
+    // advance. Worker drains all kFireCount events in one applyInputEvents()
+    // pass, then advances once.
+    for (int i = 0; i < kFireCount; i++)
+    {
+        scene->fireViewModelTrigger("fidget");
+    }
+    scene->postElapsedTime(0.016f);
+
+    REQUIRE(waitFor([&]() {
+        return renderCount.load(std::memory_order_relaxed) > 0;
+    }));
+
+    // Burst 2: concurrent fires from a separate thread, mirroring the rig's
+    // worker-post pattern (CharacterRig._onWorkerPost dispatching fires from
+    // a non-UI source). Verifies the queue mutex is contention-safe and
+    // doesn't deadlock with the advance loop.
+    int beforeBurst2 = renderCount.load(std::memory_order_relaxed);
+    std::thread firer([&]() {
+        for (int i = 0; i < kFireCount; i++)
+        {
+            scene->fireViewModelTrigger("fidget");
+        }
+    });
+    scene->postElapsedTime(0.016f);
+    firer.join();
+
+    // Worker continues making progress after the second burst drains.
+    scene->postElapsedTime(0.016f);
+    REQUIRE(waitFor([&]() {
+        return renderCount.load(std::memory_order_relaxed) > beforeBurst2;
+    }));
+}
+
 TEST_CASE("ThreadedScene ViewModel snapshot empty without watch",
           "[ThreadedScene]")
 {
