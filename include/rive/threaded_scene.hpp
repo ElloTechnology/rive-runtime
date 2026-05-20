@@ -132,6 +132,19 @@ public:
         // constructor to avoid a flash of empty content. Bindings whose render
         // callback must run only on the worker thread should set this false.
         bool runFirstFrameSync = true;
+
+        // Self-paced render loop interval. When > 0, the worker computes `dt`
+        // from a steady_clock between cycles and waits at most this many
+        // microseconds on the wake CV; when 0 (legacy), the worker waits up
+        // to 100 ms for `postElapsedTime` and uses the accumulated time as
+        // `dt`. Setting this to e.g. 16667 (60 Hz) decouples the bg render
+        // rate from the UI ticker rate, so Flutter's compositor wake (via
+        // SurfaceProducer.scheduleFrame from the render-success callback)
+        // can run at the target rate even when nothing on the UI thread is
+        // calling postElapsedTime. Bindings that already drive the worker
+        // from a UI ticker should leave this at 0.
+        int targetFrameIntervalUs = 0;
+
         std::function<void(const std::string&)> logWarning;
     };
 
@@ -278,6 +291,14 @@ private:
     std::mutex m_wakeMutex;
     std::condition_variable m_wakeCV;
     bool m_wakeFlag = false; // protected by m_wakeMutex
+
+    // Self-paced loop config. When `m_targetFrameIntervalUs > 0`, threadMain
+    // ignores `m_accumulatedTime` and computes `dt` from a steady_clock
+    // anchored at `m_lastTickClockUs` (set in the constructor and updated
+    // every cycle). When 0 (legacy), the worker waits on `m_wakeFlag` for up
+    // to 100 ms and uses the externally-posted accumulated time.
+    int m_targetFrameIntervalUs = 0;
+    int64_t m_lastTickClockUs = 0;
 
     // ViewModel instance for property lookups (accessed only on bg thread).
     rcp<ViewModelInstanceRuntime> m_viewModelInstance;
