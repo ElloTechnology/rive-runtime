@@ -30,6 +30,7 @@ ThreadedScene::ThreadedScene(
     m_renderCallback(std::move(renderCallback)),
     m_viewModelInstance(std::move(viewModelInstance)),
     m_logWarning(std::move(config.logWarning)),
+    m_externalCycleOutputFlag(config.externalCycleOutputFlag),
     m_width(config.width),
     m_height(config.height),
     m_targetFrameIntervalUs(config.targetFrameIntervalUs)
@@ -618,19 +619,59 @@ void ThreadedScene::runOneFrame(float dt)
     collectReportedEvents();
     snapshotViewModelProperties();
 
+    // Compute "this cycle published Dart-visible output" BEFORE invoking
+    // the render callback so bindings can gate push notifications. True
+    // iff this cycle queued any reported event OR the new snapshot
+    // differs from the previous one (last cycle's). The bg thread is
+    // the sole writer to m_viewModelSnapshot so no lock is needed for
+    // the read here — UI-thread acquireFrame readers take the mutex
+    // independently. Cost: O(N) hashtable comparison, N = watched-
+    // property count.
+    const bool producedDartVisibleOutput =
+        !m_pendingEvents.empty() ||
+        (!m_pendingSnapshot.empty() &&
+         m_pendingSnapshot != m_viewModelSnapshot);
+    m_lastCycleProducedOutput.store(producedDartVisibleOutput,
+                                    std::memory_order_release);
+    if (m_externalCycleOutputFlag != nullptr)
+    {
+        m_externalCycleOutputFlag->store(producedDartVisibleOutput,
+                                         std::memory_order_release);
+    }
+
     int w = m_width.load(std::memory_order_relaxed);
     int h = m_height.load(std::memory_order_relaxed);
 
     rcp<RenderImage> newImage;
-    if (m_renderCallback && w > 0 && h > 0)
+    const bool sized = (w > 0 && h > 0);
+    if (m_renderCallback && sized)
     {
         newImage = m_renderCallback(m_artboard.get(), w, h);
     }
+    else if (m_renderCallback && !sized && m_logWarning)
+    {
+        // Surface not yet sized (or torn down): the callback can't
+        // produce a frame. Rate-limited to once per ~second on a 60Hz
+        // worker so it surfaces during layout races without drowning
+        // logcat when a surface stays at 0×0 for long stretches.
+        if ((m_advanceCount.load(std::memory_order_relaxed) % 60) == 0)
+        {
+            m_logWarning(
+                "ThreadedScene: zero-size surface (w=" +
+                std::to_string(w) + " h=" + std::to_string(h) +
+                "), skipping render this cycle");
+        }
+    }
+
+    const bool produced = static_cast<bool>(newImage);
 
     // Swap cached image, ViewModel snapshot, and reported events
     // together under one lock so the render thread sees a coherent
     // triple from this bg cycle (event A and the snapshot reflecting
-    // A's transition land atomically).
+    // A's transition land atomically). The
+    // `producedDartVisibleOutput` flag was computed and published
+    // BEFORE the render callback above, so the callback can gate
+    // push notifications on it.
     {
         std::lock_guard<std::mutex> lock(m_cachedImageMutex);
         if (newImage)
@@ -653,6 +694,12 @@ void ThreadedScene::runOneFrame(float dt)
                 std::make_move_iterator(m_pendingEvents.end()));
             m_pendingEvents.clear();
         }
+    }
+
+    m_advanceCount.fetch_add(1, std::memory_order_relaxed);
+    if (produced)
+    {
+        m_renderedCount.fetch_add(1, std::memory_order_relaxed);
     }
 }
 
