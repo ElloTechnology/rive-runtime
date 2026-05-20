@@ -146,6 +146,16 @@ public:
         int targetFrameIntervalUs = 0;
 
         std::function<void(const std::string&)> logWarning;
+
+        // Optional binding-owned flag that ThreadedScene writes to before
+        // each render callback. Set to true iff the cycle published a new
+        // event OR the new snapshot differs from the previous one. Lets
+        // bindings gate push notifications (Dart_PostInteger_DL on
+        // Android) on Dart-visible work, suppressing wakes on quiet
+        // cycles where the worker animated but produced no diff.
+        // The pointer must outlive the ThreadedScene (typically a member
+        // of the owning binding).
+        std::atomic<bool>* externalCycleOutputFlag = nullptr;
     };
 
     // Callback invoked on the background thread after each advanceAndApply.
@@ -248,6 +258,38 @@ public:
     // returning nullptr on EGL/GL failure and surface that state to
     // application code. The scene only stops via stop() / destruction.
 
+    // Total bg-thread cycles completed (state-machine advance + snapshot +
+    // event collection + optional render callback). Bumped once per
+    // runOneFrame, including cycles where the render callback was skipped
+    // (e.g. zero-size surface, no callback registered) or returned nullptr.
+    uint64_t advanceCount() const
+    {
+        return m_advanceCount.load(std::memory_order_relaxed);
+    }
+
+    // Total bg-thread cycles that produced a new RenderImage (render
+    // callback ran and returned non-null). Diverges from advanceCount when
+    // the bg thread advances state without producing a new frame.
+    uint64_t renderedCount() const
+    {
+        return m_renderedCount.load(std::memory_order_relaxed);
+    }
+
+    // True if the most recently completed runOneFrame swap published either
+    // new reported events OR a snapshot whose contents differed from the
+    // previous cycle. Bindings can gate Dart-side push notifications on
+    // this so quiet cycles (worker animating but no Dart-visible state
+    // change) don't trigger spurious UI-thread wakes.
+    //
+    // Set under m_cachedImageMutex right after the snapshot/event swap;
+    // read with acquire ordering so the render callback (which executes on
+    // the bg thread inside the same runOneFrame, after the swap) sees the
+    // correct value for the cycle that just completed.
+    bool lastCycleProducedOutput() const
+    {
+        return m_lastCycleProducedOutput.load(std::memory_order_acquire);
+    }
+
 private:
     void threadMain();
     void pushEvent(ThreadedInputEvent event);
@@ -288,6 +330,9 @@ private:
     // Thread lifecycle.
     std::thread m_thread;
     std::atomic<bool> m_running{false};
+    std::atomic<uint64_t> m_advanceCount{0};
+    std::atomic<uint64_t> m_renderedCount{0};
+    std::atomic<bool> m_lastCycleProducedOutput{false};
     std::mutex m_wakeMutex;
     std::condition_variable m_wakeCV;
     bool m_wakeFlag = false; // protected by m_wakeMutex
@@ -303,6 +348,7 @@ private:
     // ViewModel instance for property lookups (accessed only on bg thread).
     rcp<ViewModelInstanceRuntime> m_viewModelInstance;
     std::function<void(const std::string&)> m_logWarning;
+    std::atomic<bool>* m_externalCycleOutputFlag = nullptr;
 
     // Dimensions (atomics for lock-free reads from render thread).
     std::atomic<int> m_width{0};
