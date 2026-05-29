@@ -309,16 +309,20 @@ void ThreadedScene::threadMain()
             // Self-paced mode waits at most `m_targetFrameIntervalUs` so the
             // loop ticks at the configured cadence; legacy mode waits 100 ms
             // for an external `postElapsedTime` wake. Either mode also wakes
-            // immediately on `m_wakeFlag` (input events) — except in
-            // self-paced mode the predicate ignores `m_wakeFlag` so that
-            // postElapsedTime can't short-circuit the interval and pin the
-            // bg rate to the UI ticker rate. Input events still surface in
-            // the next applyInputEvents at the interval boundary (≤ 16 ms
-            // at 60 Hz — acceptable input latency for the threaded use case).
+            // immediately on `m_wakeFlag` (input events) or on stop.
             const auto waitInterval =
                 selfPaced
                     ? std::chrono::microseconds(m_targetFrameIntervalUs)
                     : std::chrono::microseconds(100 * 1000);
+            // Predicate semantics differ between modes:
+            //   legacy   — wake on m_wakeFlag (postElapsedTime/inputs) OR stop.
+            //   selfPaced — wake ONLY on stop. m_wakeFlag from
+            //               postElapsedTime would otherwise short-circuit the
+            //               interval and pin the bg rate to the UI ticker
+            //               rate. Input events (pointer/setVm) are processed
+            //               at the next interval boundary in applyInputEvents
+            //               — at 60 Hz that's ≤ 16 ms input latency, which
+            //               is acceptable for the use case here.
             m_wakeCV.wait_for(lock,
                               waitInterval,
                               [this, selfPaced] {
@@ -345,11 +349,11 @@ void ThreadedScene::threadMain()
         {
             // Compute dt from steady_clock so the SM advance is independent
             // of how often `postElapsedTime` is called (or whether it is at
-            // all — e.g. when an external Ticker is muted while the host
-            // route is offscreen). Any `m_accumulatedTime` posted by the UI
-            // side is folded in so paused/resumed transitions don't double-
-            // count: legacy callers can still drive the SM during self-paced
-            // operation without producing duplicate dt.
+            // all — e.g. when ThreadedRiveView's Ticker is muted while the
+            // host route is offscreen). Any `m_accumulatedTime` posted by
+            // the UI side is folded in so paused/resumed transitions don't
+            // double-count: legacy callers can still drive the SM during
+            // self-paced operation without producing duplicate dt.
             const int64_t nowUs =
                 std::chrono::duration_cast<std::chrono::microseconds>(
                     std::chrono::steady_clock::now().time_since_epoch())
@@ -610,8 +614,8 @@ void ThreadedScene::runOneFrame(float dt)
     // inside the callback and set their own atomic before returning
     // nullptr. There is no try/catch here because every build that
     // consumes this code is compiled with -fno-exceptions (Flutter
-    // Android, the unit_tests harness, etc.); a try/catch would compile
-    // out and a thrown exception would call std::terminate anyway. If a
+    // Android, the unit_tests harness); a try/catch would compile out
+    // and a thrown exception would call std::terminate anyway. If a
     // future build configuration enables exceptions, route fatal-error
     // reporting through return values rather than reintroducing a
     // catch-all here.
