@@ -32,7 +32,6 @@ ContourMeasure::PosTanDistance PathMeasure::atDistance(float distance) const
     }
     if (m_contours.empty())
     {
-        // Nothing to measure (e.g. the path is empty or scaled to zero).
         ContourMeasure::PosTanDistance result;
         result.distance = distance;
         return result;
